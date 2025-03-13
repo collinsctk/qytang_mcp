@@ -73,6 +73,51 @@ def add(a: int, b: int) -> int:
     """计算两个数字之和"""
     return a + b
 
+# 2. 工具：获取所有设备的名称
+@mcp.tool()
+def get_all_devices_name() -> list:
+    """ 获取所有设备的名称
+
+    Args: None
+
+    return: 设备名称的列表
+    """
+    return ['C8Kv1', 'C8Kv2', 'Nexus1']
+
+@mcp.tool()
+def get_device_version(device_name: str) -> str:
+    """
+    获取特定设备的系统版本
+
+    Args:
+        device_name: 设备名称
+
+    return: 返回特定设备的系统版本
+    """
+    device_versions = {
+        'C8Kv1': 'version 11.1',
+        'C8Kv2': 'version 12.2',
+        'Nexus1': 'version 13.0'
+    }
+    return device_versions.get(device_name, '未知版本')
+
+@mcp.tool()
+def get_device_interface_info(device_name: str) -> dict:
+    """
+    获取特定设备接口信息!  包含IP地址, MAC地址和速率
+
+    Args:
+        device_name: 设备名称
+
+    return: 返回特定设备的接口信息! 包含IP地址, MAC地址和速率
+    """
+    device_interfaces = {
+        'C8Kv1': {"ip_address": "10.1.1.1", "mac_address": "00:11:22:33:44:55", "speed": "10G"},
+        'C8Kv2': {"ip_address": "10.1.1.2", "mac_address": "00:11:22:66:BA:55", "speed": "40G"},
+        'Nexus1': {"ip_address": "10.1.11.1", "mac_address": "00:11:22:78:1A:55", "speed": "100G"},
+    }
+    return device_interfaces.get(device_name, {device_name: '接口信息未找到'})
+
 # 静态资源：返回系统的基本信息
 @mcp.resource("info://system", description="系统信息资源，提供服务器版本和Python版本")
 def get_system_info() -> str:
