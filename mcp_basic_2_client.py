@@ -1,6 +1,7 @@
 import asyncio
 import ssl
 import os
+import json
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 import httpx
@@ -12,8 +13,15 @@ SERVER_PORT = 443  # 使用 HTTPS 的标准端口，确保与服务器配置一�
 # 是否使用 SSL/TLS 加密连接
 USE_SSL = True
 
+# 全局变量：是否启用认证（需要与服务器端保持一致）
+enable_authen = False
+
 # 根证书路径
 ROOT_CA_PATH = "./certs/ca.cer"  # 修改为您的根证书路径
+
+# 认证信息
+USERNAME = "qinke"
+PASSWORD = "cisco"
 
 # 修改 httpx 的 SSL 验证行为，使用根证书
 # 保存原始的 AsyncClient 类
@@ -33,16 +41,76 @@ if USE_SSL and os.path.isfile(ROOT_CA_PATH):
 else:
     print("警告: 未找到根证书，将使用系统默认的证书验证")
 
+# 获取认证token
+async def get_auth_token(username, password):
+    # 如果认证被禁用，返回一个虚拟token
+    if not enable_authen:
+        print("认证已禁用，使用虚拟token")
+        return {
+            "token": "disabled_authentication_mode",
+            "expiry": 0,
+            "expires_in": 0,
+            "token_type": "Bearer"
+        }
+        
+    protocol = "https" if USE_SSL else "http"
+    token_url = f"{protocol}://{SERVER_HOST}:{SERVER_PORT}/get_token"
+    
+    print(f"正在获取认证token...")
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                token_url,
+                json={"username": username, "password": password},
+                timeout=30.0
+            )
+            
+            if response.status_code == 200:
+                token_data = response.json()
+                print(f"成功获取token: {token_data['token'][:10]}...")
+                return token_data
+            else:
+                print(f"获取token失败: {response.status_code} - {response.text}")
+                return None
+    except Exception as e:
+        print(f"获取token时发生错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+# 自定义SSE客户端，添加认证头
+def authenticated_sse_client(url, token=None):
+    """返回带有认证头的SSE客户端"""
+    # 如果认证被禁用或没有提供token，不添加认证头
+    if not enable_authen or not token:
+        return sse_client(url=url)
+        
+    headers = {"Authorization": f"Bearer {token}"}
+    return sse_client(url=url, headers=headers)
+
 async def main():
     # 根据是否使用 SSL 构建不同的 URL 前缀
     protocol = "https" if USE_SSL else "http"
     url = f"{protocol}://{SERVER_HOST}:{SERVER_PORT}/sse"
     
     print(f"连接到服务器: {url}")
+    print(f"认证状态: {'启用' if enable_authen else '禁用'}")
     
     try:
-        # 使用 sse_client 连接到服务器
-        async with sse_client(url=url) as (read, write):
+        token = None
+        
+        # 如果启用了认证，获取token
+        if enable_authen:
+            token_data = await get_auth_token(USERNAME, PASSWORD)
+            if not token_data:
+                print("无法获取认证token，退出程序")
+                return
+                
+            token = token_data["token"]
+        
+        # 使用带认证的 sse_client 连接到服务器
+        async with authenticated_sse_client(url=url, token=token) as (read, write):
             async with ClientSession(read, write) as session:
                 # 初始化 MCP 会话（握手）
                 await session.initialize()
@@ -76,6 +144,12 @@ async def main():
                 print(f"提示 query-password 返回的内容: {result_prompt}")
 
                 print(result_prompt.messages[0].content.text)
+                
+                # 4. 如果启用了认证，使用MCP工具获取token (演示)
+                if enable_authen:
+                    result_token = await session.call_tool("get_auth_token", arguments={"username": USERNAME, "password": PASSWORD})
+                    print(f"调用工具 get_auth_token 的结果: {result_token}")
+                    print(json.dumps(result_token.content[0].text, indent=2))
     except Exception as e:
         print(f"连接错误: {e}")
         # 打印更详细的错误信息

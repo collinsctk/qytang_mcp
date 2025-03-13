@@ -6,16 +6,66 @@ import os
 import ssl
 import uvicorn
 import asyncio
+import secrets
+import time
 from mcp.server.sse import SseServerTransport
 from starlette.applications import Starlette
 from starlette.routing import Mount, Route
+from starlette.middleware import Middleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
 
 # 配置日志输出
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("MCPServer")
 
+# 全局变量：是否启用认证
+enable_authen = False
+
 # 初始化 MCP 服务器，名称为 "FastMCP Server Example"
 mcp = FastMCP("FastMCP Server Example")
+
+# 存储有效的token
+valid_tokens = {}
+TOKEN_EXPIRY = 3600  # Token有效期为1小时
+
+# Token验证中间件
+class TokenAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        # 如果认证被禁用，直接放行所有请求
+        if not enable_authen:
+            return await call_next(request)
+            
+        # 跳过对token获取端点的验证
+        if request.url.path == "/get_token":
+            return await call_next(request)
+            
+        # 检查Authorization头
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            return JSONResponse({"error": "未提供有效的认证token"}, status_code=401)
+        
+        token = auth_header.replace("Bearer ", "")
+        
+        # 验证token
+        if token not in valid_tokens or valid_tokens[token]["expiry"] < time.time():
+            return JSONResponse({"error": "token无效或已过期"}, status_code=401)
+            
+        # 更新token最后使用时间
+        valid_tokens[token]["last_used"] = time.time()
+        
+        return await call_next(request)
+
+# 生成新token
+def generate_token(username):
+    token = secrets.token_hex(16)
+    expiry = time.time() + TOKEN_EXPIRY
+    valid_tokens[token] = {
+        "username": username,
+        "expiry": expiry,
+        "last_used": time.time()
+    }
+    return token, expiry
 
 # 1. 工具：加法计算
 @mcp.tool()
@@ -69,6 +119,33 @@ def query_password_prompt(username: str) -> str:
     password = get_user_password(username)
     return f"用户 {username} 的密码是：{password}"
 
+# 4. 工具：获取认证token
+@mcp.tool()
+def get_auth_token(username: str, password: str) -> dict:
+    """获取认证token，需要提供有效的用户名和密码"""
+    # 如果认证被禁用，返回一个虚拟token
+    if not enable_authen:
+        return {
+            "token": "disabled_authentication_mode",
+            "expiry": time.time() + TOKEN_EXPIRY,
+            "expires_in": TOKEN_EXPIRY,
+            "token_type": "Bearer",
+            "message": "认证已禁用，此token仅为占位符"
+        }
+        
+    stored_password = get_user_password(username)
+    
+    if stored_password == password:
+        token, expiry = generate_token(username)
+        return {
+            "token": token,
+            "expiry": expiry,
+            "expires_in": TOKEN_EXPIRY,
+            "token_type": "Bearer"
+        }
+    else:
+        return {"error": "用户名或密码不正确"}
+
 # 创建 ASGI 应用
 async def create_app():
     # 创建 SSE 传输
@@ -83,11 +160,52 @@ async def create_app():
                 mcp._mcp_server.create_initialization_options(),
             )
     
-    # 创建 Starlette 应用
+    # 创建token获取端点
+    async def get_token(request):
+        # 如果认证被禁用，返回一个虚拟token
+        if not enable_authen:
+            return JSONResponse({
+                "token": "disabled_authentication_mode",
+                "expiry": time.time() + TOKEN_EXPIRY,
+                "expires_in": TOKEN_EXPIRY,
+                "token_type": "Bearer",
+                "message": "认证已禁用，此token仅为占位符"
+            })
+            
+        try:
+            data = await request.json()
+            username = data.get("username")
+            password = data.get("password")
+            
+            if not username or not password:
+                return JSONResponse({"error": "需要提供用户名和密码"}, status_code=400)
+                
+            stored_password = get_user_password(username)
+            if stored_password == password:
+                token, expiry = generate_token(username)
+                return JSONResponse({
+                    "token": token,
+                    "expiry": expiry,
+                    "expires_in": TOKEN_EXPIRY,
+                    "token_type": "Bearer"
+                })
+            else:
+                return JSONResponse({"error": "用户名或密码不正确"}, status_code=401)
+        except Exception as e:
+            return JSONResponse({"error": f"请求处理错误: {str(e)}"}, status_code=500)
+    
+    # 创建中间件列表
+    middleware = []
+    if enable_authen:
+        middleware.append(Middleware(TokenAuthMiddleware))
+    
+    # 创建 Starlette 应用，添加token认证中间件
     app = Starlette(
         debug=True,
+        middleware=middleware,
         routes=[
             Route("/sse", endpoint=handle_sse),
+            Route("/get_token", endpoint=get_token, methods=["POST"]),
             Mount("/messages/", app=sse.handle_post_message),
         ],
     )
@@ -103,6 +221,12 @@ if __name__ == "__main__":
     mcp._setup_handlers()
 
     logger.info(f"启用 SSL 加密，使用证书: {ssl_certfile}")
+    
+    # 根据认证状态输出日志
+    if enable_authen:
+        logger.info("已启用 Token 认证")
+    else:
+        logger.info("已禁用 Token 认证")
     
     # 创建 SSL 上下文
     ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
