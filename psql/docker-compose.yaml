@@ -1,0 +1,17 @@
+version: '3.1'
+services:
+  qytpg:
+    image: postgres:13.7
+    container_name: qytpg
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: qytangdbuser
+      POSTGRES_PASSWORD: Cisc0123
+      POSTGRES_DB: qytangdb
+    volumes:
+      - ./pg_hba.conf:/etc/postgresql/pg_hba.conf
+      - ./postgresql.conf:/etc/postgresql/postgresql.conf
+    command:
+      -c config_file=/etc/postgresql/postgresql.conf
+      -c hba_file=/etc/postgresql/pg_hba.conf
