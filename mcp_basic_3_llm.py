@@ -52,7 +52,10 @@ DEFAULT_CONFIG = {
     "password": "cisco",     # 保留认证信息
     "ca_cert_path": "./certs/ca.cer",
     "verify_ssl": True,
-    "openai_model": "gpt-3.5-turbo"  # 默认使用的OpenAI模型
+    "openai_model": "gpt-4o-mini",  # 默认使用的OpenAI模型
+    "base_url": None,
+    # "openai_model": "qwq:latest",  # 默认使用的OpenAI模型
+    # "base_url": "http://127.0.0.1:11434/v1/"
 }
 
 # 是否启用OpenAI功能
@@ -93,12 +96,16 @@ class MCPLLMClient:
         self.token_expiry: Optional[float] = None
         self.last_refresh_time: float = 0  # 上次刷新能力的时间
         self.refresh_interval: float = 300  # 刷新间隔，默认5分钟
-        
+        print(self.config["base_url"])
         # 初始化OpenAI客户端
         if ENABLE_OPENAI and OPENAI_API_KEY:
             try:
-                self.openai_client = OpenAI(api_key=OPENAI_API_KEY)
-                logger.info("OpenAI客户端初始化成功")
+                if self.config["base_url"]:
+                    self.openai_client = OpenAI(api_key=OPENAI_API_KEY, base_url=self.config["base_url"])
+                    logger.info(f"OpenAI客户端初始化成功，使用base_url: {self.config['base_url']}")
+                else:
+                    self.openai_client = OpenAI(api_key=OPENAI_API_KEY)
+                    logger.info("OpenAI客户端初始化成功，使用默认base_url")
             except Exception as e:
                 logger.error(f"OpenAI客户端初始化失败: {e}")
                 self.openai_client = None
@@ -1048,7 +1055,10 @@ def parse_args():
     parser.add_argument("--ca-cert", default=DEFAULT_CONFIG["ca_cert_path"], help="CA证书路径")
     parser.add_argument("--no-verify", action="store_false", dest="verify_ssl", default=DEFAULT_CONFIG["verify_ssl"], help="不验证SSL证书")
     parser.add_argument("--openai-model", default=DEFAULT_CONFIG["openai_model"], help="OpenAI模型名称")
-    
+    if DEFAULT_CONFIG["base_url"]:
+        parser.add_argument("--base-url", default=DEFAULT_CONFIG["base_url"], help="模型的base_url")
+    else:
+        parser.add_argument("--base-url", default=None, help="模型的base_url")
     return parser.parse_args()
 
 if __name__ == "__main__":
@@ -1064,7 +1074,8 @@ if __name__ == "__main__":
         "password": args.password,
         "ca_cert_path": args.ca_cert,
         "verify_ssl": args.verify_ssl,
-        "openai_model": args.openai_model
+        "openai_model": args.openai_model,
+        "base_url": args.base_url
     }
     
     # 运行客户端
