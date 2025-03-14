@@ -463,35 +463,18 @@ class MCPLLMClient:
             # 添加MCP工具
             for tool_name, tool in self.tools.items():
                 tool_schema = getattr(tool, "inputSchema", {})
+                # 直接使用工具的原始描述
                 tool_desc = getattr(tool, "description", "")
                 
-                # 如果没有描述，尝试从工具名称生成一个更有意义的描述
+                # 如果没有描述，提供一个基本描述
                 if not tool_desc:
                     tool_desc = f"MCP工具: {tool_name}"
-                    # 根据工具名称推断可能的功能
-                    if "get" in tool_name.lower() and "all" in tool_name.lower():
-                        tool_desc += "，用于获取所有相关资源或信息"
-                    elif "get" in tool_name.lower():
-                        tool_desc += "，用于获取特定资源或信息"
-                    elif "add" in tool_name.lower():
-                        tool_desc += "，用于添加或计算数据"
-                    elif "query" in tool_name.lower():
-                        tool_desc += "，用于查询特定信息"
-                    elif "auth" in tool_name.lower():
-                        tool_desc += "，用于身份验证或授权"
                 
-                # 增强工具描述，添加更多上下文
-                if tool_name == "get_all_devices_name":
-                    tool_desc = "获取所有设备的名称列表，返回一个包含所有设备名称的数组"
-                elif tool_name == "query_user_password":
-                    tool_desc = "查询指定用户的密码，需要提供用户名参数"
-                elif tool_name == "get_auth_token":
-                    tool_desc = "获取认证令牌，需要提供用户名和密码参数"
-                
+                # 创建OpenAI工具定义，使用原始工具名称
                 openai_tool = {
                     "type": "function",
                     "function": {
-                        "name": f"mcp_tool_{tool_name}",
+                        "name": f"mcp__{tool_name}",  # 使用双下划线作为前缀，避免命名冲突
                         "description": tool_desc,
                         "parameters": tool_schema if tool_schema else {"type": "object", "properties": {}}
                     }
@@ -556,16 +539,30 @@ class MCPLLMClient:
             4. 确保参数完整，不要省略必需参数
             5. 对于返回列表或复杂数据结构的工具，确保完整展示所有结果
             6. 理解工具的功能和用途，选择最适合用户需求的工具
-            7. 如果用户请求获取某种列表或集合，优先选择带有"get_all"前缀的工具
             
-            当用户的查询涉及以下情况时，选择相应的工具：
-            - 查询设备列表或所有设备：使用get_all_devices_name工具
-            - 查询用户密码：使用query_user_password工具
-            - 获取认证令牌：使用get_auth_token工具
-            - 查看系统信息：使用info://system资源
+            可用的工具包括：
+            {tool_list}
+            
+            可用的资源包括：
+            {resource_list}
+            
+            可用的提示符包括：
+            {prompt_list}
             
             请确保正确理解用户的意图，并选择最合适的工具来满足需求。
             """
+            
+            # 动态生成工具、资源和提示符列表
+            tool_list = "\n".join([f"- {name}: {getattr(tool, 'description', '无描述')}" for name, tool in self.tools.items()])
+            resource_list = "\n".join([f"- {uri}: {getattr(resource, 'description', '无描述')}" for uri, resource in self.resources.items()])
+            prompt_list = "\n".join([f"- {name}: {getattr(prompt, 'description', '无描述')}" for name, prompt in self.prompts.items()])
+            
+            # 填充系统提示中的占位符
+            system_prompt = system_prompt.format(
+                tool_list=tool_list if tool_list else "无可用工具",
+                resource_list=resource_list if resource_list else "无可用资源",
+                prompt_list=prompt_list if prompt_list else "无可用提示符"
+            )
             
             # 调用OpenAI API，使用function calling
             response = self.openai_client.chat.completions.create(
@@ -590,9 +587,9 @@ class MCPLLMClient:
                 function_args = json.loads(tool_call.function.arguments)
                 
                 # 执行相应的工具调用
-                if function_name.startswith("mcp_tool_"):
+                if function_name.startswith("mcp__"):
                     # 调用MCP工具
-                    mcp_tool_name = function_name[9:]  # 去掉"mcp_tool_"前缀
+                    mcp_tool_name = function_name[5:]  # 去掉"mcp__"前缀
                     try:
                         # 再次检查工具是否存在，以防在刷新后工具列表发生变化
                         if mcp_tool_name not in self.tools:
