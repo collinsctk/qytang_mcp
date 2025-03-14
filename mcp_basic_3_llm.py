@@ -438,7 +438,7 @@ class MCPLLMClient:
             return SimpleNamespace(messages=[message])
 
     async def process_user_query_with_openai(self, query: str) -> str:
-        """使用OpenAI处理用户查询
+        """使用OpenAI处理用户查询，支持多轮函数调用
         
         Args:
             query: 用户查询
@@ -539,6 +539,8 @@ class MCPLLMClient:
             4. 确保参数完整，不要省略必需参数
             5. 对于返回列表或复杂数据结构的工具，确保完整展示所有结果
             6. 理解工具的功能和用途，选择最适合用户需求的工具
+            7. 如果一个问题需要多次调用不同的工具来获取完整信息，请分步骤进行
+            8. 当你需要进一步信息时，可以继续调用相关工具
             
             可用的工具包括：
             {tool_list}
@@ -564,145 +566,269 @@ class MCPLLMClient:
                 prompt_list=prompt_list if prompt_list else "无可用提示符"
             )
             
-            # 调用OpenAI API，使用function calling
-            response = self.openai_client.chat.completions.create(
-                model=self.config["openai_model"],
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": query}
-                ],
-                tools=openai_tools,
-                tool_choice="auto",
-                temperature=0,
-                max_tokens=1000
-            )
+            # 初始化消息历史
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": query}
+            ]
             
-            # 解析OpenAI回复
-            message = response.choices[0].message
+            # 设置最大循环次数，防止无限循环
+            max_loop_count = 5
+            loop_count = 0
             
-            # 检查是否有工具调用
-            if message.tool_calls:
-                tool_call = message.tool_calls[0]
-                function_name = tool_call.function.name
-                function_args = json.loads(tool_call.function.arguments)
+            # 最终结果
+            final_result = ""
+            
+            # 循环处理，支持多轮函数调用
+            while loop_count < max_loop_count:
+                loop_count += 1
+                logger.info(f"开始第 {loop_count} 轮对话")
                 
-                # 执行相应的工具调用
-                if function_name.startswith("mcp__"):
-                    # 调用MCP工具
-                    mcp_tool_name = function_name[5:]  # 去掉"mcp__"前缀
-                    try:
-                        # 再次检查工具是否存在，以防在刷新后工具列表发生变化
-                        if mcp_tool_name not in self.tools:
-                            # 尝试再次刷新工具列表
-                            await self.refresh_capabilities()
-                            if mcp_tool_name not in self.tools:
-                                return f"很抱歉，'{mcp_tool_name}' 服务不存在。请尝试其他可用的服务。"
-                            
-                        result = await self.call_tool(mcp_tool_name, function_args)
+                # 调用OpenAI API，使用function calling
+                response = self.openai_client.chat.completions.create(
+                    model=self.config["openai_model"],
+                    messages=messages,
+                    tools=openai_tools,
+                    tool_choice="auto",
+                    temperature=0,
+                    max_tokens=1000
+                )
+                
+                # 解析OpenAI回复
+                message = response.choices[0].message
+                
+                # 将AI回复添加到消息历史中
+                messages.append({"role": "assistant", "content": message.content, "tool_calls": message.tool_calls})
+                
+                # 检查是否有工具调用
+                if message.tool_calls:
+                    # 处理所有工具调用
+                    for tool_call in message.tool_calls:
+                        function_name = tool_call.function.name
+                        function_args = json.loads(tool_call.function.arguments)
+                        tool_call_id = tool_call.id
                         
-                        # 移除特殊处理，使用通用逻辑
-                        if hasattr(result, 'content') and result.content:
-                            # 检查返回内容是否为列表类型
-                            content_text = result.content[0].text
+                        # 执行相应的工具调用
+                        if function_name.startswith("mcp__"):
+                            # 调用MCP工具
+                            mcp_tool_name = function_name[5:]  # 去掉"mcp__"前缀
                             try:
-                                # 尝试解析为JSON，如果成功则可能是列表或字典
-                                parsed_content = json.loads(content_text)
-                                if isinstance(parsed_content, list):
-                                    return f"执行结果: {json.dumps(parsed_content, ensure_ascii=False, indent=2)}"
-                                elif isinstance(parsed_content, dict):
-                                    return f"执行结果: {json.dumps(parsed_content, ensure_ascii=False, indent=2)}"
-                                else:
-                                    return f"执行结果: {content_text}"
-                            except (json.JSONDecodeError, TypeError):
-                                # 如果不是有效的JSON，则直接返回文本
-                                return f"执行结果: {content_text}"
-                        return f"工具 '{mcp_tool_name}' 执行成功，但没有返回内容。"
-                    except Exception as e:
-                        logger.error(f"执行工具 '{mcp_tool_name}' 时出错: {e}")
-                        return f"很抱歉，'{mcp_tool_name}' 服务暂时不可用。"
-                
-                elif function_name == "mcp_resource":
-                    # 访问MCP资源
-                    uri = function_args.get("uri")
-                    if not uri:
-                        return "错误: 未提供资源URI"
-                    
-                    try:
-                        # 检查资源是否存在，使用字符串比较
-                        resource_exists = False
-                        for resource_uri in self.resources.keys():
-                            if str(resource_uri) == str(uri):
-                                resource_exists = True
-                                break
+                                # 再次检查工具是否存在
+                                if mcp_tool_name not in self.tools:
+                                    # 尝试再次刷新工具列表
+                                    await self.refresh_capabilities()
+                                    if mcp_tool_name not in self.tools:
+                                        tool_result = f"很抱歉，'{mcp_tool_name}' 服务不存在。请尝试其他可用的服务。"
+                                        messages.append({
+                                            "tool_call_id": tool_call_id,
+                                            "role": "tool",
+                                            "name": function_name,
+                                            "content": json.dumps({"error": tool_result})
+                                        })
+                                        continue
                                 
-                        if not resource_exists:
-                            # 尝试再次刷新资源列表
-                            await self.refresh_capabilities()
+                                # 调用工具
+                                result = await self.call_tool(mcp_tool_name, function_args)
+                                
+                                # 处理结果
+                                if hasattr(result, 'content') and result.content:
+                                    content_text = result.content[0].text
+                                    try:
+                                        # 尝试解析为JSON
+                                        parsed_content = json.loads(content_text)
+                                        # 将结果添加到消息历史
+                                        messages.append({
+                                            "tool_call_id": tool_call_id,
+                                            "role": "tool",
+                                            "name": function_name,
+                                            "content": json.dumps(parsed_content)
+                                        })
+                                    except (json.JSONDecodeError, TypeError):
+                                        # 如果不是有效的JSON，则直接返回文本
+                                        messages.append({
+                                            "tool_call_id": tool_call_id,
+                                            "role": "tool",
+                                            "name": function_name,
+                                            "content": content_text
+                                        })
+                                else:
+                                    # 没有返回内容
+                                    messages.append({
+                                        "tool_call_id": tool_call_id,
+                                        "role": "tool",
+                                        "name": function_name,
+                                        "content": json.dumps({"result": "无内容"})
+                                    })
+                            except Exception as e:
+                                logger.error(f"执行工具 '{mcp_tool_name}' 时出错: {e}")
+                                messages.append({
+                                    "tool_call_id": tool_call_id,
+                                    "role": "tool",
+                                    "name": function_name,
+                                    "content": json.dumps({"error": f"执行出错: {str(e)}"})
+                                })
+                        
+                        elif function_name == "mcp_resource":
+                            # 访问MCP资源
+                            uri = function_args.get("uri")
+                            if not uri:
+                                messages.append({
+                                    "tool_call_id": tool_call_id,
+                                    "role": "tool",
+                                    "name": function_name,
+                                    "content": json.dumps({"error": "未提供资源URI"})
+                                })
+                                continue
                             
-                            # 再次检查资源是否存在
-                            resource_exists = False
-                            for resource_uri in self.resources.keys():
-                                if str(resource_uri) == str(uri):
-                                    resource_exists = True
-                                    break
+                            try:
+                                # 检查资源是否存在
+                                resource_exists = False
+                                for resource_uri in self.resources.keys():
+                                    if str(resource_uri) == str(uri):
+                                        resource_exists = True
+                                        break
+                                
+                                if not resource_exists:
+                                    # 尝试再次刷新资源列表
+                                    await self.refresh_capabilities()
                                     
-                            if not resource_exists:
-                                return f"很抱歉，资源 '{uri}' 不存在。请尝试其他可用的资源。"
-                            
-                        result = await self.read_resource(uri)
-                        content = result.contents[0].text if hasattr(result, 'contents') and result.contents else "无内容"
-                        return f"资源内容:\n{content}"
-                    except Exception as e:
-                        logger.error(f"访问资源 '{uri}' 时出错: {e}")
-                        return f"很抱歉，资源 '{uri}' 暂时不可用。"
-                
-                elif function_name == "mcp_prompt":
-                    # 使用MCP提示符
-                    prompt_name = function_args.get("prompt_name")
-                    arguments = function_args.get("arguments", {})
-                    
-                    if not prompt_name:
-                        return "错误: 未提供提示符名称"
-                    
-                    try:
-                        # 再次检查提示符是否存在，以防在刷新后提示符列表发生变化
-                        if prompt_name not in self.prompts:
-                            # 尝试再次刷新提示符列表
-                            await self.refresh_capabilities()
-                            if prompt_name not in self.prompts:
-                                return f"很抱歉，提示符 '{prompt_name}' 不存在。请尝试其他可用的提示符。"
-                            
-                        # 检查必需参数
-                        prompt_obj = self.prompts.get(prompt_name)
-                        required_args = []
-                        if hasattr(prompt_obj, 'arguments'):
-                            for arg in prompt_obj.arguments:
-                                if isinstance(arg, dict) and arg.get('required', False):
-                                    required_args.append(arg.get('name'))
+                                    # 再次检查资源是否存在
+                                    resource_exists = False
+                                    for resource_uri in self.resources.keys():
+                                        if str(resource_uri) == str(uri):
+                                            resource_exists = True
+                                            break
+                                    
+                                    if not resource_exists:
+                                        messages.append({
+                                            "tool_call_id": tool_call_id,
+                                            "role": "tool",
+                                            "name": function_name,
+                                            "content": json.dumps({"error": f"资源 '{uri}' 不存在"})
+                                        })
+                                        continue
+                                
+                                # 读取资源
+                                result = await self.read_resource(uri)
+                                content = result.contents[0].text if hasattr(result, 'contents') and result.contents else "无内容"
+                                
+                                # 将结果添加到消息历史
+                                messages.append({
+                                    "tool_call_id": tool_call_id,
+                                    "role": "tool",
+                                    "name": function_name,
+                                    "content": content
+                                })
+                            except Exception as e:
+                                logger.error(f"访问资源 '{uri}' 时出错: {e}")
+                                messages.append({
+                                    "tool_call_id": tool_call_id,
+                                    "role": "tool",
+                                    "name": function_name,
+                                    "content": json.dumps({"error": f"访问资源出错: {str(e)}"})
+                                })
                         
-                        # 检查是否缺少必需参数
-                        missing_args = [arg for arg in required_args if arg not in arguments]
-                        if missing_args:
-                            return f"错误: 提示符 '{prompt_name}' 缺少必需参数: {missing_args}"
-                        
-                        result = await self.get_prompt(prompt_name, arguments)
-                        if hasattr(result, 'messages') and result.messages:
-                            return f"{result.messages[0].content.text}"
-                        return f"提示符 '{prompt_name}' 已获取，但没有返回内容。"
-                    except Exception as e:
-                        logger.error(f"使用提示符 '{prompt_name}' 时出错: {e}")
-                        return f"很抱歉，提示符 '{prompt_name}' 暂时不可用。"
+                        elif function_name == "mcp_prompt":
+                            # 使用MCP提示符
+                            prompt_name = function_args.get("prompt_name")
+                            arguments = function_args.get("arguments", {})
+                            
+                            if not prompt_name:
+                                messages.append({
+                                    "tool_call_id": tool_call_id,
+                                    "role": "tool",
+                                    "name": function_name,
+                                    "content": json.dumps({"error": "未提供提示符名称"})
+                                })
+                                continue
+                            
+                            try:
+                                # 检查提示符是否存在
+                                if prompt_name not in self.prompts:
+                                    # 尝试再次刷新提示符列表
+                                    await self.refresh_capabilities()
+                                    if prompt_name not in self.prompts:
+                                        messages.append({
+                                            "tool_call_id": tool_call_id,
+                                            "role": "tool",
+                                            "name": function_name,
+                                            "content": json.dumps({"error": f"提示符 '{prompt_name}' 不存在"})
+                                        })
+                                        continue
+                                
+                                # 检查必需参数
+                                prompt_obj = self.prompts.get(prompt_name)
+                                required_args = []
+                                if hasattr(prompt_obj, 'arguments'):
+                                    for arg in prompt_obj.arguments:
+                                        if isinstance(arg, dict) and arg.get('required', False):
+                                            required_args.append(arg.get('name'))
+                                
+                                # 检查是否缺少必需参数
+                                missing_args = [arg for arg in required_args if arg not in arguments]
+                                if missing_args:
+                                    messages.append({
+                                        "tool_call_id": tool_call_id,
+                                        "role": "tool",
+                                        "name": function_name,
+                                        "content": json.dumps({"error": f"缺少必需参数: {missing_args}"})
+                                    })
+                                    continue
+                                
+                                # 获取提示符
+                                result = await self.get_prompt(prompt_name, arguments)
+                                if hasattr(result, 'messages') and result.messages:
+                                    messages.append({
+                                        "tool_call_id": tool_call_id,
+                                        "role": "tool",
+                                        "name": function_name,
+                                        "content": result.messages[0].content.text
+                                    })
+                                else:
+                                    messages.append({
+                                        "tool_call_id": tool_call_id,
+                                        "role": "tool",
+                                        "name": function_name,
+                                        "content": json.dumps({"result": "无内容"})
+                                    })
+                            except Exception as e:
+                                logger.error(f"使用提示符 '{prompt_name}' 时出错: {e}")
+                                messages.append({
+                                    "tool_call_id": tool_call_id,
+                                    "role": "tool",
+                                    "name": function_name,
+                                    "content": json.dumps({"error": f"使用提示符出错: {str(e)}"})
+                                })
+                else:
+                    # 如果没有工具调用，表示对话已完成
+                    final_result = message.content if message.content else "很抱歉，我无法理解您的请求或找不到合适的服务来处理它。"
+                    break
             
-            # 如果没有工具调用，返回AI的回复
-            if not message.content:
-                return "很抱歉，我无法理解您的请求或找不到合适的服务来处理它。请尝试其他查询或直接使用可用的工具。"
-            return message.content
+            # 如果达到最大循环次数但仍未得到最终结果，则请求AI总结
+            if not final_result and loop_count >= max_loop_count:
+                # 添加一个请求总结的消息
+                messages.append({
+                    "role": "user", 
+                    "content": "请根据已获取的信息，总结并回答我的问题。"
+                })
+                
+                # 再次调用OpenAI API，请求总结
+                response = self.openai_client.chat.completions.create(
+                    model=self.config["openai_model"],
+                    messages=messages,
+                    temperature=0,
+                    max_tokens=1000
+                )
+                
+                final_result = response.choices[0].message.content
+            
+            return final_result
                 
         except Exception as e:
             logger.error(f"OpenAI处理出错: {e}")
             import traceback
             traceback.print_exc()
-            return f"很抱歉，我无法处理您的请求。请稍后再试或尝试其他查询。"
+            return f"很抱歉，我无法处理您的请求。请稍后再试或尝试其他查询。错误: {str(e)}"
     
     async def process_user_query(self, query: str) -> str:
         """处理用户查询
